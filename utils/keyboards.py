@@ -1,4 +1,5 @@
 from aiogram import types
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 LANG_KB = types.InlineKeyboardMarkup(inline_keyboard=[
     [types.InlineKeyboardButton(text="🇺🇿 O'zbek", callback_data="lang:uz")],
@@ -21,4 +22,19 @@ REQUEST_CONTACT_KB = types.ReplyKeyboardMarkup(
     keyboard=[[types.KeyboardButton(text="📞 Raqamni yuborish", request_contact=True)]],
     resize_keyboard=True,
     one_time_keyboard=True,
+)
+
+MAIN_MENU_KB = ReplyKeyboardMarkup(
+    keyboard=[
+        [
+            KeyboardButton(text="📂 Mening fayllarim"),
+            KeyboardButton(text="⭐️ Sevimlilar"),
+        ],
+        [
+            KeyboardButton(text="⚙️ Sozlamalar"),
+            KeyboardButton(text="❓ Yordam"),
+        ],
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=False
 )

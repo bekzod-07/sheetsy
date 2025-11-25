@@ -20,7 +20,7 @@ from db import (
     get_last_file_id_by_tg,
     get_last_sheet_title_for_file_by_tg,
     get_user_by_tg,
-    set_last_sheet_title_for_file_by_tg,
+    set_last_sheet_title_for_file_by_tg, get_google_email_by_tg
 )
 from google_oauth import get_credentials_for_tg
 from stt_client import stt_long, stt_short
@@ -41,6 +41,7 @@ class VAdd(StatesGroup):
 # =========================
 _ZW = "\u200b"
 _NBSP = "\u00a0"
+
 
 
 def _s(x) -> str:
@@ -171,7 +172,6 @@ def _coerce_by_tag(tag: str, value: str, dd_options: List[str]) -> str:
     t = (tag or "").upper()
 
     if t.startswith("#DD"):
-        # HAR DOIM ro‘yxatga snap qilamiz; opsiyalar bo‘sh bo‘lsa — bo‘sh
         if not dd_options:
             return ""
         base = (value or "").strip()
@@ -192,25 +192,8 @@ def _coerce_by_tag(tag: str, value: str, dd_options: List[str]) -> str:
     return value or ""
 
 
-
-# === REPLACE old _labels_from_ai with this ===
+# === AI chiqishini shablon ustunlariga map qilish ===
 def _labels_from_ai(ai_out: dict, cols_meta: List[dict]) -> Dict[str, str]:
-    """
-    AI natijasidan (ai_out) va shablon ustun metama'lumotlaridan (cols_meta)
-    varaqga yoziladigan qiymatlar xaritasini (field_key -> value) hosil qiladi.
-
-    Qoidalar:
-      - #DD ustunlar uchun faqat dd_options ichidan tanlanadi (AI bergan matn *snap* qilinadi).
-      - #DT dd.mm.yyyy formatiga majburlanadi.
-      - #NB faqat butun raqam (matndan ajratilib normalizatsiya qilinadi).
-      - #FF bo'sh qoladi.
-      - #TX erkin matn.
-
-    Shuningdek, #DD uchun AI qaytargan semantik qiymatlar (TOLOV_TURI/VALYUTA/HARAJAT)
-    bo'sh bo'lsa LABEL_VALUES, aks holda semantikdan boshlang'ich baza olinadi
-    va eng yaqin dropdown varianti tanlanadi.
-    """
-    # AI chiqishi: LABEL_VALUES (label -> value) va semantiklar
     lv_ai: Dict[str, str] = dict(ai_out.get("LABEL_VALUES") or {})
 
     sem_pay = (ai_out.get("TOLOV_TURI") or "").strip()
@@ -229,7 +212,6 @@ def _labels_from_ai(ai_out: dict, cols_meta: List[dict]) -> Dict[str, str]:
         L = (lbl or "").lower()
         return ("harajat" in L) or ("xarajat" in L) or ("kategoriya" in L) or ("toifa" in L) or ("category" in L)
 
-    # 1) #DD ustunlar uchun "snapped" qiymatlarni oldindan hisoblab olamiz
     dd_fixed: Dict[str, str] = {}
     for m in cols_meta:
         tag = (m.get("tag") or "").upper()
@@ -239,10 +221,8 @@ def _labels_from_ai(ai_out: dict, cols_meta: List[dict]) -> Dict[str, str]:
         lbl = m.get("label") or ""
         opts = m.get("dd_options") or []
         if not opts:
-            # DD bo'lsa-da opsiyalar yo'q — snap qilolmaymiz, keyin LV'dan borini olamiz
             continue
 
-        # Baza qiymat: avval semantikdan, bo'lmasa AI ning LABEL_VALUES dan
         base = (lv_ai.get(lbl) or "").strip()
         if not base:
             if _is_pay_label(lbl) and sem_pay:
@@ -252,12 +232,10 @@ def _labels_from_ai(ai_out: dict, cols_meta: List[dict]) -> Dict[str, str]:
             elif _is_cat_label(lbl) and sem_cat:
                 base = sem_cat
 
-        # Snap: baza bo'lsa eng yaqinini tanlash, bo'lmasa default — opsiyalar ro'yxatining 1-varianti
         snapped = _smart_match_plus(base, opts) if base else opts[0]
         print(f"[DD-MAP] lbl='{lbl}' base='{base}' -> snapped='{snapped}'")
         dd_fixed[lbl] = snapped
 
-    # 2) Yakuniy chiqish: field_key -> value (teg qoidalari bilan majburlab)
     out: Dict[str, str] = {}
     for m in cols_meta:
         lbl = m.get("label") or ""
@@ -266,15 +244,14 @@ def _labels_from_ai(ai_out: dict, cols_meta: List[dict]) -> Dict[str, str]:
         key = (m.get("field_key") or "")
 
         if tag.upper().startswith("#DD"):
-            # Avval snap-langan qiymat, bo'lmasa AI LABEL_VALUES'dagi qiymat
             val_in = dd_fixed.get(lbl, lv_ai.get(lbl, ""))
         else:
             val_in = lv_ai.get(lbl, "")
 
-        # Teg qoidalarini qo'llaymiz (#DT/#NB/#FF/#TX)
         out[key] = _coerce_by_tag(tag, val_in, opts)
 
     return out
+
 
 # =========================
 # UTIL: A1, #S, label/DD, va boshqalar
@@ -322,7 +299,14 @@ def _looks_like_named_range(s: str) -> bool:
 
 
 def _get_values_2d(svc, spreadsheet_id: str, rng: str) -> List[List[str]]:
-    raw = svc.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=rng).execute().get("values", []) or []
+    raw = (
+        svc.spreadsheets()
+        .values()
+        .get(spreadsheetId=spreadsheet_id, range=rng)
+        .execute()
+        .get("values", [])
+        or []
+    )
     safe: List[List[str]] = []
     for row in raw:
         if not row:
@@ -368,7 +352,14 @@ def _pick_label_cell_value(svc, spreadsheet_id: str, sheet_title: str, s_row_idx
 
 
 def _get_sheet_grid(svc, spreadsheet_id: str, sheet_title: str) -> dict:
-    meta = svc.spreadsheets().get(spreadsheetId=spreadsheet_id, fields="sheets(properties(title,gridProperties))").execute()
+    meta = (
+        svc.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets(properties(title,gridProperties))",
+        )
+        .execute()
+    )
     for sh in meta.get("sheets", []):
         props = sh.get("properties", {})
         if props.get("title") == sheet_title:
@@ -390,7 +381,7 @@ def _a1_sheet(title: str) -> str:
 
 
 def _is_hash_s(val: str) -> bool:
-    s = _s(val).replace("\u200b", "").strip()
+    s = _s(val).replace(_ZW, "").strip()
     return s.upper() == "#S"
 
 
@@ -406,7 +397,6 @@ def _fix_a1_side_token(side: str) -> str:
         col, row = m.group(1), m.group(2) or ""
         return f"{col}{row}"
     return s
-
 
 def _sanitize_a1_ref(a1: str, default_sheet: str) -> str:
     if not a1:
@@ -439,15 +429,25 @@ def _sanitize_a1_ref(a1: str, default_sheet: str) -> str:
 
 
 def _get_sheet_values(svc, spreadsheet_id: str, a1: str) -> List[str]:
-    vr = svc.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=a1).execute()
+    vr = (
+        svc.spreadsheets()
+        .values()
+        .get(spreadsheetId=spreadsheet_id, range=a1)
+        .execute()
+    )
     vals = vr.get("values") or []
     return [_sstrip(r[0]) if r else "" for r in vals]
 
 
 def _get_sheet_id_and_grid(svc, spreadsheet_id: str, sheet_title: str) -> Tuple[int, Dict]:
-    meta = svc.spreadsheets().get(
-        spreadsheetId=spreadsheet_id, fields="sheets(properties(sheetId,title,gridProperties))"
-    ).execute()
+    meta = (
+        svc.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets(properties(sheetId,title,gridProperties))",
+        )
+        .execute()
+    )
     for sh in meta.get("sheets", []):
         props = sh.get("properties", {})
         if props.get("title") == sheet_title:
@@ -456,18 +456,38 @@ def _get_sheet_id_and_grid(svc, spreadsheet_id: str, sheet_title: str) -> Tuple[
 
 
 def _get_column_values(svc, spreadsheet_id: str, a1: str) -> List[str]:
-    vr = svc.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=a1, majorDimension="COLUMNS").execute()
+    vr = (
+        svc.spreadsheets()
+        .values()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            range=a1,
+            majorDimension="COLUMNS",
+        )
+        .execute()
+    )
     cols = vr.get("values") or []
     return [_sstrip(v) for v in (cols[0] if cols else [])]
 
 
 def _get_sheet_titles(svc, spreadsheet_id: str) -> List[str]:
-    meta = svc.spreadsheets().get(spreadsheetId=spreadsheet_id, fields="sheets(properties(title))").execute()
+    meta = (
+        svc.spreadsheets()
+        .get(spreadsheetId=spreadsheet_id, fields="sheets(properties(title))")
+        .execute()
+    )
     return [sh["properties"]["title"] for sh in (meta.get("sheets") or [])]
 
 
 def _get_sheet_props(svc, spreadsheet_id: str, sheet_title: str) -> dict:
-    meta = svc.spreadsheets().get(spreadsheetId=spreadsheet_id, fields="sheets(properties(title,gridProperties))").execute()
+    meta = (
+        svc.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets(properties(title,gridProperties))",
+        )
+        .execute()
+    )
     for sh in meta.get("sheets", []):
         props = sh.get("properties", {})
         if props.get("title") == sheet_title:
@@ -483,36 +503,55 @@ def _right_edge_letter(svc, spreadsheet_id: str, sheet_title: str) -> str:
 
 
 def _try_guess_dd_source_on_sheet(svc, spreadsheet_id: str, sheet_title: str, label: str) -> Optional[str]:
-    if not label: return None
+    if not label:
+        return None
+
     label_norm = (label or "").strip().casefold()
 
-    # Varaqqa mos kengaytirilgan skaner
-    meta = svc.spreadsheets().get(spreadsheetId=spreadsheet_id, fields="sheets(properties(title,gridProperties))").execute()
-    grid = {}
-    for sh in meta.get("sheets", []):
-        if sh["properties"]["title"] == sheet_title:
-            grid = sh.get("gridProperties", {}) or {}
-            break
-    cols = max(26, min(int(grid.get("columnCount") or 26), 5000))
-    rows = max(200, min(int(grid.get("rowCount") or 1000), 2000))
+    # ❗ Juda katta range olishning hojati yo‘q
+    MAX_SCAN_ROWS = 60      # 500 emas, faqat 60 qator skaner qilamiz (10x tez)
+    MAX_SCAN_COLS = 60      # 5000 emas, 40 ta ustun (odatda shablonlar kichik bo‘ladi)
 
-    right = _col_idx_to_letter(cols - 1)
-    rng = f"{_a1_sheet(sheet_title)}!A1:{right}{rows}"
+    grid = (
+        svc.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets(properties(title,gridProperties))",
+        )
+        .execute()
+    )
+
+    # Real colCount ni olamiz, lekin limit qo‘yamiz
+    col_count = 0
+    for sh in grid.get("sheets", []):
+        if sh["properties"]["title"] == sheet_title:
+            g = sh.get("gridProperties", {}) or {}
+            col_count = int(g.get("columnCount", 26))
+            break
+
+    # ustunni ham limitlaymiz
+    col_count = max(5, min(col_count, MAX_SCAN_COLS))
+
+    right = _col_idx_to_letter(col_count - 1)
+
+    # ❗ Endi faqat A1:AO60 (yoki shunga yaqin) skaner
+    rng = f"{_a1_sheet(sheet_title)}!A1:{right}{MAX_SCAN_ROWS}"
 
     vals = _get_values_2d(svc, spreadsheet_id, rng)
+
     for r, row in enumerate(vals):
         for c, cell in enumerate(row):
             if (cell or "").strip().casefold() == label_norm:
                 col_letter = _col_idx_to_letter(c)
                 start_1b = r + 2
                 return f"{_a1_sheet(sheet_title)}!{col_letter}{start_1b}:{col_letter}"
+
     return None
 
 
 
-
 # ====== Config: kesh ======
-_TEMPLATE_TTL_SEC = 200
+_TEMPLATE_TTL_SEC = 36000
 _tpl_cache = {}  # {(file_id, sheet_title): {"ts": time.time(), "data": (markers, dd_opts, s_row_idx, s_col_idx, cols_meta)}}
 
 
@@ -533,20 +572,24 @@ def _cache_set_tpl(file_id: str, sheet_title: str, data_tuple):
 
 def _find_anchor_S(svc, spreadsheet_id: str, sheet_title: str) -> Tuple[int, int]:
     right = _right_edge_letter(svc, spreadsheet_id, sheet_title)
-    rng = f"{_a1_sheet(sheet_title)}!A1:{right}200"
+    rng = f"{_a1_sheet(sheet_title)}!A1:{right}50"
     try:
         values = _get_values_2d(svc, spreadsheet_id, rng)
         for r, row in enumerate(values):
             for c, val in enumerate(row):
                 if _is_hash_s(val):
                     return r, c
-        raise RuntimeError("#S topilmadi. Marker birinchi 200 qatorda bo'lishi kerak.")
+        raise RuntimeError("#S topilmadi. Marker birinchi 50 qatorda bo'lishi kerak.")
     except Exception as e:
         raise RuntimeError(f"#S markerini qidirishda xatolik: {e}")
 
 
 def _list_sheet_titles(svc, spreadsheet_id: str) -> List[str]:
-    meta = svc.spreadsheets().get(spreadsheetId=spreadsheet_id, fields="sheets(properties(title))").execute()
+    meta = (
+        svc.spreadsheets()
+        .get(spreadsheetId=spreadsheet_id, fields="sheets(properties(title))")
+        .execute()
+    )
     return [sh["properties"]["title"] for sh in (meta.get("sheets") or [])]
 
 
@@ -777,7 +820,14 @@ def _ensure_capacity(
             "sheetId": sheet_id,
             "gridProperties": {"rowCount": need_rows, "columnCount": need_cols},
         }
-        reqs.append({"updateSheetProperties": {"properties": new_props, "fields": "gridProperties(rowCount,columnCount)"}})
+        reqs.append(
+            {
+                "updateSheetProperties": {
+                    "properties": new_props,
+                    "fields": "gridProperties(rowCount,columnCount)",
+                }
+            }
+        )
 
     if not reqs:
         return
@@ -791,16 +841,20 @@ async def _append_structured_row(
     sheet_title: str,
     text_or_data,
     use_ai: bool = True,
+    tpl=None,  # (markers, dd_opts, s_row_idx, s_col_idx, cols_meta) — agar bor bo‘lsa qayta detect qilmaymiz
 ):
     creds = await get_credentials_for_tg(tg_id)
     if not creds:
         raise RuntimeError("Google bilan /connect qiling")
     svc = build("sheets", "v4", credentials=creds)
 
-    try:
-        _, _, s_row_idx, s_col_idx, cols_meta = _detect_template_and_sources(svc, file_id, sheet_title)
-    except Exception as e:
-        raise RuntimeError(f"Kerakli teglar yoki shablon muammosi: {e}")
+    if tpl is not None:
+        _, _, s_row_idx, s_col_idx, cols_meta = tpl
+    else:
+        try:
+            _, _, s_row_idx, s_col_idx, cols_meta = _detect_template_and_sources(svc, file_id, sheet_title)
+        except Exception as e:
+            raise RuntimeError(f"Kerakli teglar yoki shablon muammosi: {e}")
 
     if use_ai:
         dyn_dd = _build_dd_options_from_cols(cols_meta)
@@ -825,9 +879,23 @@ async def _append_structured_row(
     try:
         target_row = _find_target_row_by_dt_col(svc, file_id, sheet_title, s_row_idx, cols_meta)
     except Exception:
-        target_row = _find_target_row_by_sequence(svc, file_id, sheet_title, s_row_idx, s_col_idx, cols_meta, max_n=100_000)
+        target_row = _find_target_row_by_sequence(
+            svc,
+            file_id,
+            sheet_title,
+            s_row_idx,
+            s_col_idx,
+            cols_meta,
+            max_n=100_000,
+        )
 
-    _ensure_capacity(svc, file_id, sheet_title, target_row_1b=target_row, target_col_index_0b=max_c)
+    _ensure_capacity(
+        svc,
+        file_id,
+        sheet_title,
+        target_row_1b=target_row,
+        target_col_index_0b=max_c,
+    )
 
     write_rng = f"{_a1_sheet(sheet_title)}!{left_letter}{target_row}:{right_letter}{target_row}"
 
@@ -836,7 +904,12 @@ async def _append_structured_row(
         return (
             svc.spreadsheets()
             .values()
-            .update(spreadsheetId=file_id, range=write_rng, valueInputOption="USER_ENTERED", body=body)
+            .update(
+                spreadsheetId=file_id,
+                range=write_rng,
+                valueInputOption="USER_ENTERED",
+                body=body,
+            )
             .execute()
         )
 
@@ -866,6 +939,10 @@ async def handle_voice_or_audio(msg: Message, state: FSMContext):
     t_all_start = time.perf_counter()
 
     tg_id = msg.from_user.id
+
+    # 🟩 BU YERDA EMAIL OLINADI
+    google_email = await get_google_email_by_tg(tg_id)
+
     file_id = await get_last_file_id_by_tg(tg_id)
     if not file_id:
         await msg.answer("Avval /mysheets orqali fayl tanlang (inline tugmadan bitta faylni bosing).")
@@ -889,21 +966,28 @@ async def handle_voice_or_audio(msg: Message, state: FSMContext):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as f:
         await bot.download(file_obj, destination=f.name)
         audio_path = f.name
-    dl_sec = time.perf_counter() - t_dl_start
+    _ = time.perf_counter() - t_dl_start
 
     try:
         if duration <= 60:
             t_stt_start = time.perf_counter()
-            resp = await stt_short(audio_path, title=f"tg_{tg_id}_{msg.message_id}", language=language, has_diarization=False)
+            resp = await stt_short(
+                audio_path,
+                title=f"tg_{tg_id}_{msg.message_id}",
+                language=language,
+                has_diarization=False,
+            )
             stt_sec = time.perf_counter() - t_stt_start
 
             text = resp.get("text") or resp.get("result") or resp.get("transcript") or ""
             if not text:
-                await msg.answer("❌ STT natijasi bo'sh chiqdi.")
+                await msg.answer("❌ STT natijasi bo‘sh chiqdi.")
                 return
 
+            # TEMPLATE DETECT
             try:
-                _, _, s_row_idx, s_col_idx, cols_meta = _detect_template_and_sources(svc, file_id, sheet_title)
+                tpl = _detect_template_and_sources(svc, file_id, sheet_title)
+                _, _, s_row_idx, s_col_idx, cols_meta = tpl
             except Exception as e:
                 await msg.answer(
                     "❌ Kerakli teglar yoki shablon muammosi.\n"
@@ -916,9 +1000,19 @@ async def handle_voice_or_audio(msg: Message, state: FSMContext):
 
             t_ai_start = time.perf_counter()
             try:
-                ai_out = await extract_with_ai(text, dd_options=dyn_dd, tz="Asia/Tashkent", fields_meta=cols_meta)
+                ai_out = await extract_with_ai(
+                    text=text,
+                    dd_options=dyn_dd,
+                    tz="Asia/Tashkent",
+                    fields_meta=cols_meta,
+                    google_email=google_email   # 🟩 ENDILIKDA ISHLAYDI!
+                )
             except TypeError:
-                ai_out = await extract_with_ai(text, dd_options=dyn_dd, tz="Asia/Tashkent")
+                ai_out = await extract_with_ai(
+                    text,
+                    dd_options=dyn_dd,
+                    tz="Asia/Tashkent",
+                )
             ai_sec = time.perf_counter() - t_ai_start
 
             row_data = _labels_from_ai(ai_out, cols_meta)
@@ -929,8 +1023,10 @@ async def handle_voice_or_audio(msg: Message, state: FSMContext):
 
             kb = InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="✏️ Tahrirlash", callback_data="vadd:edit"),
-                     InlineKeyboardButton(text="✅ Yuborish", callback_data="vadd:send")]
+                    [
+                        InlineKeyboardButton(text="✏️ Tahrirlash", callback_data="vadd:edit"),
+                        InlineKeyboardButton(text="✅ Yuborish", callback_data="vadd:send"),
+                    ]
                 ]
             )
 
@@ -939,17 +1035,32 @@ async def handle_voice_or_audio(msg: Message, state: FSMContext):
                 pending={"file_id": file_id, "sheet_title": sheet_title, "data": row_data},
                 cols_meta=cols_meta,
                 dd_options=dyn_dd,
+                tpl=tpl,
             )
 
-            await msg.answer(timing_line + "\n\n" + "Tekshirib ko'ring. Tahrirlasangiz ham bo'ladi.\n\n" + preview, reply_markup=kb)
+            await msg.answer(
+                timing_line
+                + "\n\n"
+                + "Tekshirib ko‘ring. Tahrirlasangiz ham bo‘ladi.\n\n"
+                + preview,
+                reply_markup=kb,
+            )
 
         else:
             webhook = f"{BASE_URL}/webhooks/aisha-stt?tg_id={tg_id}"
-            await stt_long(audio_path, title=f"tg_{tg_id}_{msg.message_id}", has_diarization=False, webhook_url=webhook)
+            await stt_long(
+                audio_path,
+                title=f"tg_{tg_id}_{msg.message_id}",
+                has_diarization=False,
+                webhook_url=webhook,
+            )
             all_sec = time.perf_counter() - t_all_start
-            await msg.answer(f"✅ Audio qabul qilindi ({all_sec:.2f}s). Uzoq STT ishga tushdi; tayyor bo‘lsa tahrirlash/yuborish uchun yuboraman.")
+            await msg.answer(
+                f"✅ Audio qabul qilindi ({all_sec:.2f}s). "
+                "Uzoq STT ishga tushdi; tayyor bo‘lsa yuboraman."
+            )
     except Exception as e:
-        await msg.answer(f"❌ Xatolik 3: {e}")
+        await msg.answer(f"❌ Xatolik 33: {e}")
 
 
 # =========================
@@ -962,10 +1073,19 @@ async def vadd_edit(cb: CallbackQuery, state: FSMContext):
     data = p.get("data", {}) or {}
     cols_meta = d.get("cols_meta", []) or []
 
+    EXCLUDE_TAGS = {"#DT-A", "#TX-A", "#GA-A"}  # ❌ tahrirlashdan chiqariladigan ustunlar
+
     lines = []
     for i, m in enumerate(cols_meta, start=1):
+        tag = (m.get("tag") or "").upper()
+
+        # ❌ Bu TAGlar tahrirlash oynasida chiqmaydi
+        if tag in EXCLUDE_TAGS:
+            continue
+
         show_val = _value_preview_for_meta(m, data)
         lines.append(f"{str(i).zfill(2)}. {m['label']}: {show_val}")
+
 
     template_plain = "\n".join(lines)
     guide = (
@@ -978,40 +1098,58 @@ async def vadd_edit(cb: CallbackQuery, state: FSMContext):
     await state.set_state(VAdd.editing_text)
     await cb.answer()
 
-
 @router.message(VAdd.editing_text, F.text)
 async def vadd_receive_edited(msg: Message, state: FSMContext):
     text = _sstrip(msg.text)
     d = await state.get_data()
     cols_meta = d.get("cols_meta", []) or []
 
+    # label → meta map
     label_map = {(_sstrip(m["label"]).lower()): m for m in cols_meta}
     new_data: Dict[str, str] = {}
 
     for line in text.splitlines():
         if ":" not in line:
             continue
+
         try:
             left, raw_val = line.split(":", 1)
         except ValueError:
             continue
+
         left = _sstrip(left)
         raw_val = _sstrip(raw_val)
+
+        # “01. Sana:” kabi indeksni olib tashlaymiz
         left = re.sub(r"^\d{1,3}\.\s*", "", left)
         label_key = left.lower()
 
+        # label → meta
         meta = label_map.get(label_key)
         if not meta:
-            alt = label_key.replace("’", "'").replace("`", "'").replace("  ", " ").strip()
+            alt = (
+                label_key.replace("’", "'")
+                .replace("`", "'")
+                .replace("  ", " ")
+                .strip()
+            )
             meta = label_map.get(alt)
         if not meta:
             continue
 
-        norm_val = _normalize_input_for_meta(meta, raw_val, meta.get("dd_options", []))
-
         tag = (meta["tag"] or "").upper()
         key = meta["field_key"]
 
+        # ❌ Auto-fields — tahrirlash YOPIQ
+        if tag in {"#DT-A", "#TX-A", "#GA-A"}:
+            continue
+
+        # Normalizatsiya
+        norm_val = _normalize_input_for_meta(
+            meta, raw_val, meta.get("dd_options", [])
+        )
+
+        # Qoida bo‘yicha yozamiz
         if tag == "#FF":
             continue
         elif tag == "#NB":
@@ -1019,20 +1157,42 @@ async def vadd_receive_edited(msg: Message, state: FSMContext):
         else:
             new_data[key] = norm_val
 
+    # Eski pending ma'lumotlar (ai_out dan kelgan to‘liq data)
+    old_pending = d.get("pending") or {}
+    old_data = dict(old_pending.get("data") or {})
+
+    # 🔗 Yangi tahrirlarni eski data ustiga MERGE qilamiz
+    merged_data = dict(old_data)
+    merged_data.update(new_data)   # faqat tahrirlangan maydonlar yangilanadi,
+                                   # auto-fields (#DT-A, #TX-A, #GA-A) o‘zgarmaydi
+
+    # =========================
+    # PREVIEW YARATAMIZ
+    # =========================
     preview_lines = []
     for i, m in enumerate(cols_meta, start=1):
-        show_val = _value_preview_for_meta(m, new_data)
+        show_val = _value_preview_for_meta(m, merged_data)
         preview_lines.append(f"{str(i).zfill(2)}. {m['label']}: {show_val}")
+
     preview = "\n".join(preview_lines)
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Yuborish", callback_data="vadd:send")]])
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Yuborish", callback_data="vadd:send")]
+        ]
+    )
 
     await msg.answer("Yangilangan ko‘rinish:\n\n" + preview, reply_markup=kb)
 
-    d_pending = (d.get("pending") or {}).copy()
-    d_pending["data"] = new_data
+    # pending → endi to‘liq MERGED data bilan saqlaymiz
+    d_pending = old_pending.copy()
+    d_pending["data"] = merged_data
     await state.update_data(pending=d_pending)
+
+    # qayta Yuborish/Tahrirlash holatiga o‘tamiz
     await state.set_state(VAdd.awaiting_decision)
+
+
 
 
 @router.callback_query(VAdd.awaiting_decision, F.data.startswith("vadd:sheet:"))
@@ -1053,7 +1213,7 @@ async def vadd_sheet_switch(cb: CallbackQuery, state: FSMContext):
             return
 
         if not titles or idx < 0 or idx >= len(titles):
-            await cb.answer("Bunday varoq yo‘q.", show_alert=True)
+            await cb.answer("Bunday varaq yo‘q.", show_alert=True)
             return
 
         new_title = titles[idx]
@@ -1067,11 +1227,16 @@ async def vadd_sheet_switch(cb: CallbackQuery, state: FSMContext):
         try:
             creds = await get_credentials_for_tg(cb.from_user.id)
             svc = build("sheets", "v4", credentials=creds)
-            _, dd_opts_new, _, _, cols_meta = _detect_template_and_sources(svc, pending["file_id"], new_title)
-            await state.update_data(dd_options=dd_opts_new, cols_meta=cols_meta)
+            tpl_new = _detect_template_and_sources(svc, pending["file_id"], new_title)
+            _, dd_opts_new, _, _, cols_meta = tpl_new
+            await state.update_data(dd_options=dd_opts_new, cols_meta=cols_meta, tpl=tpl_new)
 
             data = pending.get("data", {}) or {}
-            dd_keys = {m["field_key"] for m in cols_meta if (m.get("tag") or "").upper().startswith("#DD")}
+            dd_keys = {
+                m["field_key"]
+                for m in cols_meta
+                if (m.get("tag") or "").upper().startswith("#DD")
+            }
             for key in list(data.keys()):
                 up_key = (key or "").upper()
                 if up_key in dd_keys and dd_opts_new.get(up_key):
@@ -1083,10 +1248,18 @@ async def vadd_sheet_switch(cb: CallbackQuery, state: FSMContext):
         await state.update_data(pending=pending)
 
         kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="✏️ Tahrirlash", callback_data="vadd:edit"),
-                              InlineKeyboardButton(text="✅ Yuborish", callback_data="vadd:send")]]
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✏️ Tahrirlash", callback_data="vadd:edit"),
+                    InlineKeyboardButton(text="✅ Yuborish", callback_data="vadd:send"),
+                ]
+            ]
         )
-        await cb.message.answer(f"🗂 Yozish joyi: *{new_title}* tanlandi.", parse_mode="Markdown", reply_markup=kb)
+        await cb.message.answer(
+            f"🗂 Yozish joyi: *{new_title}* tanlandi.",
+            parse_mode="Markdown",
+            reply_markup=kb,
+        )
         await cb.answer()
         return
 
@@ -1100,6 +1273,7 @@ async def vadd_send(cb: CallbackQuery, state: FSMContext):
     file_id = p.get("file_id")
     sheet_title = p.get("sheet_title")
     data = p.get("data")
+    tpl = d.get("tpl")  # 🔥 shu yerda shablon keshdan olinadi
 
     if not file_id or not sheet_title or not isinstance(data, dict):
         await cb.answer("Ichki xatolik: ma'lumot yetarli emas.", show_alert=True)
@@ -1107,7 +1281,12 @@ async def vadd_send(cb: CallbackQuery, state: FSMContext):
 
     try:
         updated_range, _, preview = await _append_structured_row(
-            tg_id=cb.from_user.id, file_id=file_id, sheet_title=sheet_title, text_or_data=data, use_ai=False
+            tg_id=cb.from_user.id,
+            file_id=file_id,
+            sheet_title=sheet_title,
+            text_or_data=data,
+            use_ai=False,
+            tpl=tpl,  # 🔥 qayta detect qilmaydi
         )
         await cb.message.answer(
             "✅ Qo‘shildi!\n"
@@ -1120,3 +1299,75 @@ async def vadd_send(cb: CallbackQuery, state: FSMContext):
     finally:
         await state.clear()
         await cb.answer()
+
+# === LOCAL DATA CACHE ===
+_last10_cache = {}   # { (tg_id, file_id, sheet_title): [ {...}, {...}, ... ] }
+
+
+async def refresh_local_cache(tg_id: int):
+    file_id = await get_last_file_id_by_tg(tg_id)
+    if not file_id:
+        return None, "❌ Fayl tanlanmagan!"
+
+    creds = await get_credentials_for_tg(tg_id)
+    if not creds:
+        return None, "❌ Google bilan bog‘laning: /connect"
+
+    svc = build("sheets", "v4", credentials=creds)
+
+    # tanlangan varaq
+    try:
+        sheet_title, _ = await _resolve_sheet_title_or_autodetect(tg_id, file_id)
+    except Exception as e:
+        return None, f"❌ {e}"
+
+    # === SHABLON KESHINI TOZALAYMIZ ===
+    key = (file_id, sheet_title)
+    if key in _tpl_cache:
+        _tpl_cache.pop(key, None)
+
+    # === Shablonni qayta yaratamiz ===
+    try:
+        tpl = _detect_template_and_sources(svc, file_id, sheet_title)
+        _, _, s_row_idx, s_col_idx, cols_meta = tpl
+    except Exception as e:
+        return None, f"❌ Shablonni aniqlab bo‘lmadi: {e}"
+
+    # === Oxirgi 10 ta satrni yuklaymiz ===
+    dt_meta = next((m for m in cols_meta if (m["tag"] or "").upper() == "#DT"), None)
+    if not dt_meta:
+        return None, "❌ #DT ustuni topilmadi!"
+
+    dt_col = _col_idx_to_letter(dt_meta["col_idx"])
+    start_1b = s_row_idx + 2
+
+    rng = f"{_a1_sheet(sheet_title)}!{dt_col}{start_1b}:{dt_col}"
+    values = _get_column_values(svc, file_id, rng)
+
+    # bo‘sh bo‘lmagan joylarni topamiz
+    non_empty = [(i, v) for i, v in enumerate(values) if v.strip()]
+    if not non_empty:
+        rows = []
+    else:
+        last_rows = non_empty[-10:]   # oxirgi 10 ta
+        rows = [start_1b + idx for idx, _ in last_rows]
+
+    # endi shu qatorlar bo‘yicha to‘liq ma’lumotlarni olamiz
+    row_dicts = []
+    for r in rows:
+        left = _col_idx_to_letter(min(m["col_idx"] for m in cols_meta))
+        right = _col_idx_to_letter(max(m["col_idx"] for m in cols_meta))
+        rng = f"{_a1_sheet(sheet_title)}!{left}{r}:{right}{r}"
+        row_vals = _get_values_2d(svc, file_id, rng)[0]
+
+        data = {}
+        for m in cols_meta:
+            idx = m["col_idx"] - min(c["col_idx"] for c in cols_meta)
+            data[m["field_key"]] = row_vals[idx] if idx < len(row_vals) else ""
+
+        row_dicts.append(data)
+
+    # Saqlaymiz
+    _last10_cache[(tg_id, file_id, sheet_title)] = row_dicts
+
+    return sheet_title, f"✅ Ma’lumotlar yangilandi ({len(row_dicts)} ta qator)."
